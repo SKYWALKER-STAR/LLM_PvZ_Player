@@ -1,5 +1,7 @@
 """[feat] 全局配置 - 基于 pydantic-settings."""
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,7 +9,7 @@ class Settings(BaseSettings):
     """Agent 全局配置，支持 .env 文件与环境变量覆盖."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=Path(__file__).resolve().parents[3] / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )

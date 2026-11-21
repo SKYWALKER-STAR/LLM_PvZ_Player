@@ -2,7 +2,7 @@
 chcp 65001 >nul
 title VLM-Game-Agent
 
-cd /d "D:\PythonProject\AIGamePlayer"
+cd /d "%~dp0" || exit /b 1
 
 "venv\Scripts\python.exe" examples\agent_demo.py
 

@@ -69,7 +69,10 @@ class VLMClient:
 
         for attempt in range(1, self.retries + 1):
             logger.debug("[VLM] 第 {} 次请求，消息数: {}", attempt, len(messages))
-            self._log_request(messages)
+            logger.debug(
+                "[VLM] POST {} attempt={} timeout={}s\n{}",
+                self.chat_url, attempt, int(self.timeout), body,
+            )
 
             try:
                 t0 = time.perf_counter()
@@ -128,32 +131,3 @@ class VLMClient:
                     time.sleep(self.retry_delay)
 
         raise RuntimeError(f"VLM 调用失败（重试 {self.retries} 次）: {last_exc}") from last_exc
-
-    @staticmethod
-    def _log_request(messages: list[dict[str, Any]]) -> None:
-        """打印精简请求日志（隐藏图片 Base64 主体）."""
-        try:
-            summary = []
-            for msg in messages:
-                role = msg.get("role", "?")
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    parts = []
-                    for part in content:
-                        ptype = part.get("type", "?")
-                        if ptype == "image_url":
-                            url = part.get("image_url", {}).get("url", "")
-                            prefix = url[:60] if url else ""
-                            parts.append(f"image_url({prefix}...)")
-                        elif ptype == "text":
-                            text = part.get("text", "")
-                            parts.append(f"text({text[:80]}...)")
-                        else:
-                            parts.append(str(ptype))
-                    summary.append(f"[{role}] {', '.join(parts)}")
-                else:
-                    text = str(content)[:120]
-                    summary.append(f"[{role}] {text}...")
-            logger.debug("[VLM] 请求结构:\n{}", "\n".join(summary))
-        except Exception:
-            pass

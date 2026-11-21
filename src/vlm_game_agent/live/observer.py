@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -141,6 +143,7 @@ class LiveObserver:
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pvz-capture")
         client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
         try:
+            print(f"GEMINI_API_KEY={api_key}", flush=True)
             # Fail fast for missing window/display before connecting to a paid API.
             await asyncio.get_running_loop().run_in_executor(pool, self.source.read)
             for attempt in range(4):
@@ -156,28 +159,77 @@ class LiveObserver:
                 }
                 self.pending = None
                 self.report_received = False
+                stage = "connect"
+                resume_requested = self.resume_handle is not None
+                started = time.monotonic()
                 try:
                     async with client.aio.live.connect(model=model, config=config) as session:
                         self.record({"type": "connected", "model": model})
-                        tasks = [asyncio.create_task(self.send_frames(session, types, pool)),
-                                 asyncio.create_task(self.receive(session, types))]
+                        tasks = [asyncio.create_task(self.send_frames(session, types, pool), name="send_frames"),
+                                 asyncio.create_task(self.receive(session, types), name="receive")]
                         try:
                             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                             for task in done:
+                                stage = task.get_name()
                                 task.result()
+                            stage = "disconnect"
                         finally:
                             for task in tasks:
                                 task.cancel()
                             await asyncio.gather(*tasks, return_exceptions=True)
                 except Exception as exc:
-                    # Do not log SDK exception bodies, which may include credentials.
-                    self.record({"type": "connection_error", "error_type": type(exc).__name__,
-                                 "retry": attempt < 3})
+                    retry_delay = 2 ** attempt if attempt < 3 else None
+                    event = {
+                        "type": "connection_error", "error_type": type(exc).__name__,
+                        "model": model, "stage": stage, "attempt": attempt + 1,
+                        "max_attempts": 4, "elapsed_seconds": round(time.monotonic() - started, 3),
+                        "retry": retry_delay is not None, "retry_delay_seconds": retry_delay,
+                        "resume_requested": resume_requested,
+                    }
+                    close_frame = getattr(exc, "rcvd", None)
+                    response_body = getattr(exc, "details", None)
+                    if response_body is None:
+                        response_body = getattr(exc, "response_json", None)
+                    details = {
+                        "code": getattr(exc, "code", None),
+                        "status": getattr(exc, "status", None),
+                        "message": getattr(exc, "message", None),
+                        "close_code": getattr(close_frame, "code", None),
+                        "close_reason": getattr(close_frame, "reason", None),
+                    }
+                    if isinstance(response_body, (dict, list)):
+                        details["response_body"] = json.dumps(response_body, ensure_ascii=False)
+                    elif isinstance(response_body, str):
+                        details["response_body"] = response_body
+                    if details["message"] is None and isinstance(exc, (ConnectionError, TimeoutError)):
+                        details["message"] = str(exc)
+                    for field, value in details.items():
+                        if isinstance(value, int):
+                            event[f"error_{field}"] = value
+                        elif isinstance(value, str):
+                            for secret in (quote(api_key, safe=""), api_key,
+                                           self.resume_handle, config["session_resumption"]["handle"]):
+                                if secret:
+                                    value = value.replace(secret, "[REDACTED]")
+                            value = re.sub(r"(?i)\bAIza[\w-]{20,}", "[REDACTED]", value)
+                            value = re.sub(
+                                r"(?i)(\bbearer\s+|\b(?:key|api[_-]?key|token)\s*=\s*)[^\s&,;]+",
+                                r"\1[REDACTED]", value,
+                            )
+                            value = re.sub(
+                                r'(?i)("[\w-]*(?:key|token|authorization|password|secret|handle)"\s*:\s*)'
+                                r'"(?:\\.|[^"\\])*"', r'\1"[REDACTED]"', value,
+                            )
+                            limit = 4000 if field == "response_body" else 1000
+                            event[f"error_{field}"] = value[:limit]
+                            if len(value) > limit:
+                                event[f"error_{field}_truncated"] = True
+                    self.record(event)
                     if attempt == 3:
                         raise RuntimeError("Live 连接失败；请检查模型权限、API Key、网络及游戏窗口") from None
                     if isinstance(exc, TimeoutError):
                         self.resume_handle = None
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(retry_delay)
         finally:
             await asyncio.get_running_loop().run_in_executor(pool, self.source.close)
             pool.shutdown(wait=True)
