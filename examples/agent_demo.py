@@ -1,5 +1,6 @@
 """[feat] Agent 集成示例 - 完整的 截图→VLM→执行 闭环."""
 
+import argparse
 import sys
 import threading
 from pathlib import Path
@@ -54,7 +55,17 @@ def setup_pause_controller(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="运行完整的游戏代理")
+    parser.add_argument("--gemini-live", action="store_true", help="使用 Gemini Live 推理")
+    args = parser.parse_args()
     settings = Settings()
+    if args.gemini_live:
+        if not settings.gemini_api_key or not settings.gemini_live_model:
+            parser.error("请设置 GEMINI_API_KEY 和 GEMINI_LIVE_MODEL")
+        try:
+            import google.genai
+        except ImportError:
+            parser.error('缺少 Gemini SDK，请执行 python -m pip install -e ".[gemini]"')
     pvz_injection_pause = settings.pvz_memory_enabled and settings.pause_strategy == "soft"
     use_soft_pause = settings.pause_strategy == "soft" and not pvz_injection_pause
 
@@ -100,13 +111,19 @@ def main() -> None:
     )
 
     # 3. VLM 客户端
-    vlm = VLMClient(
-        base_url=settings.vlm_base_url,
-        model=settings.vlm_model,
-        api_key=settings.vlm_api_key,
-        max_output_tokens=settings.vlm_max_output_tokens,
-        temperature=settings.vlm_temperature,
-    )
+    if args.gemini_live:
+        from vlm_game_agent.live.agent_client import GeminiLiveAgentClient
+
+        vlm = GeminiLiveAgentClient(settings.gemini_api_key, settings.gemini_live_model)
+        print(f"Gemini Live 推理已启用: {settings.gemini_live_model}")
+    else:
+        vlm = VLMClient(
+            base_url=settings.vlm_base_url,
+            model=settings.vlm_model,
+            api_key=settings.vlm_api_key,
+            max_output_tokens=settings.vlm_max_output_tokens,
+            temperature=settings.vlm_temperature,
+        )
 
     # 4. 记忆系统
     memory = MemoryManager(settings.memory_dir)
@@ -132,7 +149,7 @@ def main() -> None:
     compress_base_url = settings.vlm_compress_base_url or settings.vlm_base_url
     compress_model = settings.vlm_compress_model or settings.vlm_model
     compress_api_key = settings.vlm_compress_api_key or settings.vlm_api_key
-    compressor = ContextCompressor(
+    compressor = None if args.gemini_live else ContextCompressor(
         base_url=compress_base_url,
         model=compress_model,
         api_key=compress_api_key,
@@ -177,7 +194,7 @@ def main() -> None:
         stop_hotkey=stop_hotkey,
         pvz_memory=pvz_memory,
         include_images_in_history=settings.agent_include_images_in_history,
-        include_image=settings.agent_include_image,
+        include_image=args.gemini_live or settings.agent_include_image,
         include_reasoning_in_history=settings.agent_include_reasoning_in_history,
         guide_dir=settings.guide_dir,
     )
@@ -198,7 +215,11 @@ def main() -> None:
         print("\n正在停止...")
         agent.stop()
     finally:
-        cap.close()
+        try:
+            if args.gemini_live:
+                vlm.close()
+        finally:
+            cap.close()
         print("Agent 已退出")
 
 

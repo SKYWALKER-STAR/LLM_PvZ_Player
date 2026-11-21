@@ -271,6 +271,8 @@ class GameAgent:
                     logger.warning("[Agent] 恢复失败: {}", exc)
 
             # 7. 解析动作
+            if not self._running:
+                break
             # === 模型主动压缩：检测 <compact> 标记 ===
             compact_summary = parse_compact(raw_output)
             if compact_summary is not None:
@@ -396,6 +398,8 @@ class GameAgent:
                     self._notify_webui("log", "基于图鉴信息追加决策...", "info")
                     try:
                         follow_up_output, follow_up_reasoning = self.vlm.chat(self._history)
+                        if not self._running:
+                            break
                         if follow_up_reasoning:
                             logger.debug("[Agent] 追加 VLM 思维链:\n{}", follow_up_reasoning)
                             self._notify_webui("log", f"[思考] {follow_up_reasoning}", "debug")
