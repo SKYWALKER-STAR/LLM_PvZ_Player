@@ -14,6 +14,14 @@ from urllib.parse import quote
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class PlantProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    card_index: int = Field(ge=0)
+    row: int = Field(ge=0, lt=5)
+    col: int = Field(ge=0, lt=9)
+
+
 class Observation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -23,6 +31,10 @@ class Observation(BaseModel):
     threats: list[str]
     suggestions: list[str]
     uncertainties: list[str]
+
+
+class PlayObservation(Observation):
+    plant: PlantProposal | None = None
 
 
 SYSTEM_PROMPT = """你是植物大战僵尸的画面观察员。只观察，绝不操作游戏。
@@ -57,7 +69,7 @@ class WindowSource:
 
 
 class LiveObserver:
-    def __init__(self, source, output: Path, interval: float = 5, timeout: float = 30):
+    def __init__(self, source, output: Path, interval: float = 5, timeout: float = 30, planter=None):
         self.source = source
         self.output = output
         self.interval = interval
@@ -66,6 +78,9 @@ class LiveObserver:
         self.next_request = 0.0
         self.sequence = 0
         self.resume_handle = None
+        self.planter = planter
+        self.report_model = PlayObservation if planter is not None else Observation
+        self.accepted_report = None
 
     def record(self, event: dict):
         event = {"time": datetime.now(timezone.utc).isoformat(), **event}
@@ -86,7 +101,7 @@ class LiveObserver:
                 raise TimeoutError("Gemini 判断超时；重建会话")
             if self.pending is None and now >= self.next_request:
                 self.sequence += 1
-                self.pending = (self.sequence, now)
+                self.pending = (self.sequence, started)
                 await session.send_client_content(
                     turns={"role": "user", "parts": [{"text": (
                         f"请判断最新游戏画面，调用 report_game_state，observation_id={self.sequence}。"
@@ -112,7 +127,7 @@ class LiveObserver:
                         try:
                             if call.name != "report_game_state":
                                 raise ValueError("未知工具")
-                            report = Observation.model_validate(call.args)
+                            report = self.report_model.model_validate(call.args)
                             if (not self.pending or report.observation_id != self.pending[0]
                                     or getattr(self, "report_received", False)):
                                 raise ValueError("过期或重复的判断")
@@ -120,6 +135,7 @@ class LiveObserver:
                                          "latency_seconds": round(time.monotonic() - self.pending[1], 3)})
                             # Wait for turn_complete before triggering another request.
                             self.report_received = True
+                            self.accepted_report = report
                             result = {"ok": True}
                         except ValueError as exc:
                             result = {"ok": False, "error": str(exc)}
@@ -127,6 +143,16 @@ class LiveObserver:
                     await session.send_tool_response(function_responses=responses)
                 content = message.server_content
                 if content and content.turn_complete:
+                    report = self.accepted_report
+                    self.accepted_report = None
+                    if self.planter is not None and report is not None and report.plant is not None and self.pending:
+                        age = time.monotonic() - self.pending[1]
+                        result = self.planter.place(report.plant) if age < self.timeout else {
+                            "status": "skipped", "reason": "observation_expired",
+                        }
+                        self.record({"type": "plant_result", "observation_id": report.observation_id,
+                                     "proposal": report.plant.model_dump(), "observation_age_seconds": round(age, 3),
+                                     **result})
                     if self.pending and not getattr(self, "report_received", False):
                         self.record({"type": "warning", "message": "本轮未返回有效结构化判断"})
                     self.pending = None
@@ -149,16 +175,20 @@ class LiveObserver:
             for attempt in range(4):
                 config = {
                     "response_modalities": ["AUDIO"],
-                    "system_instruction": SYSTEM_PROMPT,
+                    "system_instruction": SYSTEM_PROMPT + (
+                        "\nplant 字段最多建议种一株豌豆射手或向日葵。卡槽、行和列都从零开始。"
+                        "只选可用卡片与可种植的空地；不确定时省略 plant。" if self.planter is not None else ""
+                    ),
                     "tools": [{"function_declarations": [{
                         "name": "report_game_state", "description": "报告游戏画面判断，不执行操作",
-                        "parameters_json_schema": Observation.model_json_schema(),
+                        "parameters_json_schema": self.report_model.model_json_schema(),
                     }]}],
                     "context_window_compression": {"sliding_window": {}},
                     "session_resumption": {"handle": self.resume_handle},
                 }
                 self.pending = None
                 self.report_received = False
+                self.accepted_report = None
                 stage = "connect"
                 resume_requested = self.resume_handle is not None
                 started = time.monotonic()

@@ -5,9 +5,11 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from vlm_game_agent.live.observer import LiveObserver
+from vlm_game_agent.live.planting import LivePlanter
 
 
 def message(calls=None, complete=False):
@@ -24,6 +26,63 @@ def call(observation_id=1):
 
 
 class ObserverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_proposal_is_executed_and_verified_once(self):
+        source = NS(capture=NS(_window=NS(_hWnd=10)))
+        planter = LivePlanter(source, execute=True)
+        planter.memory = NS(_hwnd=10, is_connected=lambda: True)
+        seed = NS(index=0, plant_type=0, is_ready=True, sun_cost=100, name="豌豆射手")
+        state = NS(in_battle=True, is_paused=False, scene=0, level_end_countdown=0,
+                   seeds=[seed], sun=100, plants=[])
+        planter.reader = NS(read_state=Mock(side_effect=[state, NS(plants=[NS(row=0, col=2, plant_type=0)])]))
+        planter.executor = NS(injector=object(), execute=Mock(return_value={"status": "ok"}))
+        observer = LiveObserver(source, Path("unused"), timeout=5, planter=planter)
+        observer.pending = (1, time.monotonic())
+        records = []
+        observer.record = records.append
+        proposal = call()
+        proposal.args["plant"] = {"card_index": 0, "row": 0, "col": 2}
+
+        class Session:
+            async def receive(self):
+                yield message([proposal, proposal])
+                yield message(complete=True)
+                yield message(complete=True)
+                raise asyncio.CancelledError
+
+            async def send_tool_response(self, function_responses):
+                pass
+
+        with patch.dict(sys.modules, {"vlm_game_agent.pvz": NS(PvZExecutor=None, PvZMemory=None, PvZStateReader=None)}):
+            with patch("vlm_game_agent.live.planting.time.sleep"), self.assertRaises(asyncio.CancelledError):
+                await observer.receive(Session(), NS(FunctionResponse=lambda **kw: NS(**kw)))
+
+        planter.executor.execute.assert_called_once_with("place_plant", proposal.args["plant"], state)
+        self.assertEqual([event["type"] for event in records], ["observation", "plant_result"])
+        self.assertTrue(records[1]["verified"])
+
+    async def test_expired_live_proposal_is_discarded(self):
+        planter = Mock()
+        observer = LiveObserver(None, Path("unused"), timeout=5, planter=planter)
+        observer.pending = (1, time.monotonic() - 6)
+        records = []
+        observer.record = records.append
+        proposal = call()
+        proposal.args["plant"] = {"card_index": 0, "row": 0, "col": 2}
+
+        class Session:
+            async def receive(self):
+                yield message([proposal])
+                yield message(complete=True)
+                raise asyncio.CancelledError
+
+            async def send_tool_response(self, function_responses):
+                pass
+
+        with self.assertRaises(asyncio.CancelledError):
+            await observer.receive(Session(), NS(FunctionResponse=lambda **kw: NS(**kw)))
+        planter.place.assert_not_called()
+        self.assertEqual(records[-1]["reason"], "observation_expired")
+
     async def test_reports_reject_stale_duplicate_and_invalid(self):
         with tempfile.TemporaryDirectory() as directory:
             observer = LiveObserver(None, Path(directory) / "out.jsonl")
