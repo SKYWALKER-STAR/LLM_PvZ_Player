@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     vlm_temperature: float = 0.3
 
     # ========== 截图配置 ==========
+    gemini_api_key: str = ""
+    gemini_live_model: str = ""  # 指定账号可用的 Live 模型 ID
+
     capture_scale: float = 1.0
     capture_format: str = "PNG"
     capture_fps: float = 1.0

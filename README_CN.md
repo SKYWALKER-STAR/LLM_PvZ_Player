@@ -305,3 +305,8 @@ Esc 软暂停会弹出暂停菜单/退出确认框，这些 UI 元素会进入�
 - [ ] 开放 MCP 接口，支持外部 AI 应用接入 Agent
 - [ ] 支持更多游戏版本（需补充偏移量表）
 - [ ] ~~技能系统（Skills）~~（暂缓）
+
+## Gemini Live 实时观察
+
+新增独立的只观察入口：`python examples/gemini_live_demo.py`。
+安装、密钥配置和限制见 [Gemini Live 使用说明](docs/gemini_live.md)。
